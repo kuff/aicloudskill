@@ -53,25 +53,28 @@
 ## File Transfer
 ```bash
 # Upload to cluster
-scp local-file.py <user>@domain.aau.dk@ai-fe02.srv.aau.dk:~/target-dir/
+scp local-file.py aicloud:~/target-dir/
 
 # Download from cluster
-scp <user>@domain.aau.dk@ai-fe02.srv.aau.dk:~/result.txt ./
+scp aicloud:~/result.txt ./
 
-# Via SSH gateway (off-campus)
-scp -o ProxyJump=<user>@domain.aau.dk@sshgw.aau.dk <user>@domain.aau.dk@ai-fe02.srv.aau.dk:~/file ./
+# Sync a directory
+rsync -avz ./data/ aicloud:~/data/
 ```
 
-## SSH Config Example
-Add to `~/.ssh/config` for simplified access:
+## SSH Config
+Add to `~/.ssh/config` (required for ControlMaster connection reuse):
 ```
 Host aicloud
     HostName ai-fe02.srv.aau.dk
     User <user>@domain.aau.dk
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/aicloud
+    ControlPersist 8h
     # Uncomment if off-campus:
     # ProxyJump <user>@domain.aau.dk@sshgw.aau.dk
 ```
-Then connect with just: `ssh aicloud`
+Then connect with: `ssh aicloud` (authenticate once, reuse for 8 hours)
 
 ## Fair Usage Guidelines
 - Cluster is for GPU workloads only, not CPU-only computation
