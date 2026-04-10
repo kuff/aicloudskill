@@ -37,9 +37,21 @@
 | aicentre-a100 | Pioneer Centre | No | A100 nodes |
 
 ## Network & Storage
+
 - **Filesystem**: Ceph-based network storage, shared across front-end and all compute nodes
-- **Home directory**: `~` accessible everywhere — no bind mounts needed for containers
+- **Home directory** (`~`): default **1 TB** quota, accessible everywhere — no bind mounts needed for containers. Request expansion via the Service Portal (see below).
+- **Shared project storage** (`/home/project/<name>`): for collaborative use within a research group. Not for long-term archival; clean up when the project ends.
 - **Network**: AAU internal — accessible from campus, AAU VPN, or via SSH gateway (`sshgw.aau.dk`)
+
+### Local scratch (per-node, fast, ephemeral)
+
+Only certain nodes have physically-attached scratch storage. It's much faster than the network FS but **purged after 90 days untouched** — never store anything you can't regenerate.
+
+| Node | Local scratch |
+|------|---------------|
+| `i256-a40-[01-02]` | ~6.4 TB |
+| `nv-ai-[02-03]` | ~30 TB |
+| `nv-ai-04` | ~14 TB |
 
 ## Software Stack
 - **OS**: Ubuntu Linux
@@ -62,8 +74,12 @@ scp aicloud:~/result.txt ./
 rsync -avz ./data/ aicloud:~/data/
 ```
 
+Note: only `scp` and WinSCP are mentioned in the [official docs](https://hpc.aau.dk/ai-cloud/getting-started/file-management/). `rsync` over SSH works in practice (the cluster runs standard OpenSSH) but is not officially endorsed — use it at your own discretion.
+
 ## SSH Config
-Add to `~/.ssh/config` (required for ControlMaster connection reuse):
+Add to `~/.ssh/config` (required for ControlMaster connection reuse).
+
+**On-campus or AAU VPN:**
 ```
 Host aicloud
     HostName ai-fe02.srv.aau.dk
@@ -71,12 +87,55 @@ Host aicloud
     ControlMaster auto
     ControlPath ~/.ssh/sockets/aicloud
     ControlPersist 8h
-    # Uncomment if off-campus:
-    # ProxyJump <user>@domain.aau.dk@sshgw.aau.dk
 ```
-Then connect with: `ssh aicloud` (authenticate once, reuse for 8 hours)
+
+**Off-campus (no VPN):** route through the AAU SSH gateway with `ProxyJump`:
+```
+Host aicloud
+    HostName ai-fe02.srv.aau.dk
+    User <user>@domain.aau.dk
+    ProxyJump <user>@domain.aau.dk@sshgw.aau.dk
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/aicloud
+    ControlPersist 8h
+```
+
+Then connect with: `ssh aicloud` (authenticate once, reuse for 8 hours). The socket directory `~/.ssh/sockets/` must exist — create it with `mkdir -p ~/.ssh/sockets`.
+
+## Service Portal
+
+The official channel for everything that isn't `ssh`-able:
+
+- **Access requests** (researchers — students go to AI-LAB instead)
+- **Account renewals / extensions** for long-running projects
+- **Custom container image requests** — the ops team can build a `.sif` and place it in `/home/container/`
+- **Storage quota expansion requests** (default home is 1 TB)
+- **General support and policy questions**
+
+URL: https://serviceportal.aau.dk/ — search for "AI Cloud" or follow the link from https://hpc.aau.dk/ai-cloud/how-to-access/.
+
+## Troubleshooting Quick Reference
+
+| Symptom | Diagnosis | Fix |
+|---------|-----------|-----|
+| `ssh -O check aicloud` returns `Master running` but commands hang | Stale ControlMaster socket | `ssh -O exit aicloud`, then re-run the Connection Check Procedure in SKILL.md |
+| `singularity: command not found` | You're on the front-end node; Singularity only exists on compute nodes | Wrap the command in `srun` or `sbatch` |
+| `singularity build` → permission denied / unshare errors | Unprivileged build needs fakeroot | Add `--fakeroot`: `singularity build --fakeroot my.sif my.def` |
+| Container pull or build OOM | Default `--mem` too small | Use `--mem=80G --cpus-per-task=32` for builds, `--mem=60G --cpus-per-task=32` for pulls |
+| `libcublasLt.so.12` / CUDA libs missing inside container | `--nv` only mounts the NVIDIA driver, not the CUDA toolkit | Use an NVIDIA CUDA base image (`docker://nvidia/cuda:...` or `nvcr.io/nvidia/...`), not a plain `python:slim` |
+| NCCL hangs / timeouts in multi-GPU DDP | Process group misconfigured | Verify `MASTER_ADDR`/`MASTER_PORT` are set, use `srun` (not bare `python`), confirm `--ntasks` matches `--gres=gpu:N` |
+| Job stuck `PD` with reason `ReqNodeNotAvail, Reserved for maintenance` | `--time` overlaps the next maintenance window | Shorten `--time`; check the login banner for the next window date |
+| Job stuck `PD` with reason `QOSMaxJobsPerUserLimit` | Hit your tier's concurrent-job cap (Default: 12) | Cancel old jobs, wait, or apply for Deadline tier |
+| `i256-a40-*` rejects your job | Those are `aicentre` partition only (Pioneer Centre affiliation required) | Use `a256-a40-*` nodes in `prioritized`, or omit `--nodelist` and let Slurm pick |
+| `UnicodeEncodeError: surrogates not allowed` from PDF text extraction | pypdf produces unpaired UTF-16 surrogates on math-heavy docs | `raw.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")` |
+| `onnxruntime-gpu` silently downgrades to CPU | A dependency pulled CPU `onnxruntime` over the GPU build | Install order matters: install the dep first, then `pip install --force-reinstall --no-deps onnxruntime-gpu` |
+| Files visible on front-end but not inside container | `~` auto-mounts; arbitrary paths like `/tmp` do not | Bind-mount explicitly: `singularity exec --nv -B /path:/path ...` |
+| Jobs get preempted in the `batch` partition | Expected — the owning research group reclaimed the node | Use `prioritized`, or checkpoint your training |
 
 ## Fair Usage Guidelines
+
+- **No interactive development sessions.** `srun --pty`, Jupyter, and VS Code Remote SSH for development are explicitly **prohibited** by AI Cloud policy. See https://hpc.aau.dk/ai-cloud/fair-usage/. Use short batch jobs (`templates.md` §7) instead.
+- **VS Code Remote SSH is officially discouraged** for any use — it puts heavy load on the front-end node.
 - Cluster is for GPU workloads only, not CPU-only computation
 - Only Level 1 (non-confidential) data permitted
 - Not intended for long-term research data storage

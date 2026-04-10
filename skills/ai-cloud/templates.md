@@ -131,17 +131,38 @@ dependencies:
 #SBATCH --output=build_%j.out
 #SBATCH --error=build_%j.err
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=60G
+#SBATCH --mem=80G
 #SBATCH --time=04:00:00
 
 export SINGULARITY_TMPDIR=$HOME/.singularity/tmp
 export SINGULARITY_CACHEDIR=$HOME/.singularity/cache
 mkdir -p $SINGULARITY_TMPDIR $SINGULARITY_CACHEDIR
 
+# cotainr handles --fakeroot internally; you don't need to pass it.
 /home/container/cotainr build myenv.sif \
     --base-image=docker://ubuntu:24.04 \
     --conda-env=environment.yml \
     --accept-licenses
+```
+
+### Building from a `.def` file (non-cotainr)
+
+For full Singularity definition files, use `singularity build` directly. **`--fakeroot` is required** for unprivileged users on this cluster:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=build_def
+#SBATCH --output=build_%j.out
+#SBATCH --error=build_%j.err
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=80G
+#SBATCH --time=04:00:00
+
+export SINGULARITY_TMPDIR=$HOME/.singularity/tmp
+export SINGULARITY_CACHEDIR=$HOME/.singularity/cache
+mkdir -p $SINGULARITY_TMPDIR $SINGULARITY_CACHEDIR
+
+singularity build --fakeroot my_image.sif my_image.def
 ```
 
 ## 6. LLM Inference with vLLM
@@ -177,16 +198,27 @@ llm = LLM(model='meta-llama/Llama-3.3-70B-Instruct', tensor_parallel_size=4)
 "
 ```
 
-## 7. Interactive Session
+## 7. Short Iteration Batch Job
+
+Use this **instead of an interactive session** when you want to iterate on a script.
+AAU AI Cloud explicitly prohibits interactive development sessions (`srun --pty`,
+Jupyter, VS Code Remote SSH) — see https://hpc.aau.dk/ai-cloud/fair-usage/. Submit
+short batch jobs in a tight loop instead: edit, `sbatch`, read the log, repeat.
 
 ```bash
-# Get an interactive shell with 1 GPU
-srun --gres=gpu:1 --mem=32G --cpus-per-task=8 --time=02:00:00 --pty bash
+#!/bin/bash
+#SBATCH --job-name=iter
+#SBATCH --output=iter_%j.out
+#SBATCH --error=iter_%j.err
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --time=00:10:00
 
-# Interactive shell inside a container
-srun --gres=gpu:1 --mem=32G --cpus-per-task=8 --time=02:00:00 \
-    --pty singularity shell --nv pytorch_24.09-py3.sif
+# A single experiment / smoke test. Keep it short so the queue stays responsive.
+singularity exec --nv pytorch_24.09-py3.sif python3 run.py "$@"
 ```
+Submit: `sbatch iter.sh` then `tail -f iter_<jobid>.out` after `squeue --me` shows it running.
 
 ## 8. Hugging Face Token Setup
 
@@ -196,3 +228,50 @@ echo 'export HF_TOKEN="YOUR_TOKEN_HERE"' >> ~/.bashrc
 source ~/.bashrc
 ```
 Verify: `echo $HF_TOKEN`
+
+Alternatively, `huggingface-cli login` inside a container also works and stores the token under `~/.cache/huggingface/token`.
+
+## 9. Job Array (Hyperparameter Sweep)
+
+Run the same script over multiple configs in parallel. Slurm picks how many run at once based on free GPUs.
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=sweep
+#SBATCH --output=sweep_%A_%a.out
+#SBATCH --error=sweep_%A_%a.err
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=02:00:00
+#SBATCH --array=0-9
+
+CONFIGS=(config_0.yaml config_1.yaml config_2.yaml config_3.yaml config_4.yaml \
+         config_5.yaml config_6.yaml config_7.yaml config_8.yaml config_9.yaml)
+
+singularity exec --nv pytorch_24.09-py3.sif \
+    python3 train.py --config "${CONFIGS[$SLURM_ARRAY_TASK_ID]}"
+```
+Submit: `sbatch sweep.sh`. Use `%A` (array job ID) and `%a` (task index) in `--output`/`--error` so each task gets its own log. Cancel a single task with `scancel <jobid>_<taskid>`.
+
+## 10. Scheduled Off-Peak Job
+
+For long-running jobs, ask Slurm to start them during low-demand hours. Useful for being a good cluster citizen — see https://hpc.aau.dk/ai-cloud/fair-usage/.
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=overnight
+#SBATCH --output=overnight_%j.out
+#SBATCH --error=overnight_%j.err
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=12:00:00
+#SBATCH --begin=now+4hours
+
+singularity exec --nv pytorch_24.09-py3.sif python3 train.py
+```
+Or pass `--begin` to `sbatch` directly (no `#SBATCH` line needed):
+```bash
+sbatch --begin=2026-04-11T02:00:00 overnight.sh
+```

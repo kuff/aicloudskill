@@ -37,7 +37,12 @@ subsequent SSH commands reuse that connection automatically.
 
 The user's `~/.ssh/config` must have an entry for the cluster with ControlMaster
 settings. The entry must include `aicloud` as an alias (so agent commands and
-`allowed-tools` patterns match consistently). Example:
+`allowed-tools` patterns match consistently).
+
+**On-campus or AAU VPN:** the simple config below works as-is. **Off-campus
+without VPN:** uncomment the `ProxyJump` line — connections must go through the
+AAU SSH gateway (`sshgw.aau.dk`). Always ask the user which case applies before
+creating a new entry. Example:
 
 ```
 Host aicloud
@@ -115,11 +120,16 @@ rsync -avz ./data/ aicloud:~/data/
 ### Core Slurm Commands
 | Command | Purpose |
 |---------|---------|
-| `srun [flags] <command>` | Run interactive/single-shot job |
+| `srun [flags] <command>` | Run a single-shot job (for short tests; `--pty` is **prohibited** for interactive dev) |
 | `sbatch <script.sh>` | Submit batch script to queue |
+| `sbatch --array=0-9 script.sh` | Submit a job array (10 tasks indexed by `$SLURM_ARRAY_TASK_ID`) |
+| `sbatch --begin=now+4hours script.sh` | Schedule a job to start later (off-peak windows) |
 | `squeue --me` | Show user's queued/running jobs |
 | `scancel <jobid>` | Cancel a job |
+| `scancel <jobid>_<taskid>` | Cancel one task of a job array |
 | `scancel --user=$USER` | Cancel all user's jobs |
+
+**Inspecting your fair-share usage:** AI Cloud uses tier-based concurrent caps (Default = 12 jobs / 12 GPUs) rather than wall-clock quotas. To see your current fair-share score, run `ssh aicloud sshare -U`. To see your tier, ask the user — the cluster does not expose this in a single command.
 
 ### Common Cluster Queries
 
@@ -131,6 +141,9 @@ Use these tested commands — do not construct your own `sinfo`/`squeue` variant
 # GPU availability per node (type, total, in-use)
 ssh aicloud "sinfo -N --Format=NodeHost:20,StateLong:12,Gres:25,GresUsed:25"
 
+# Visual node availability overview (cluster-custom tool)
+ssh aicloud "nodesummary"
+
 # Overall node status
 ssh aicloud "sinfo -N --long"
 
@@ -139,6 +152,9 @@ ssh aicloud "squeue --format='%.8i %.12j %.10u %.6D %.5C %.15R %.12b %.10T' --so
 
 # My jobs
 ssh aicloud "squeue --me"
+
+# Schedule a long job to start during off-peak hours
+ssh aicloud "sbatch --begin=now+4hours overnight.sh"
 ```
 
 **Reading GPU availability output:** `Gres` shows total GPUs (e.g. `gpu:a40:3`),
@@ -172,15 +188,22 @@ sbatch job.sh   # where job.sh calls singularity exec --nv ...
 ```
 The `--nv` flag is **required** to expose NVIDIA GPUs inside the container.
 
+Building a `.sif` from a `.def` file requires `--fakeroot` for unprivileged users — this is enabled cluster-wide (`singularity build --fakeroot my.sif my.def`). `cotainr` handles this internally and doesn't need the flag passed explicitly.
+
 ### Pre-built Containers
 - **vLLM**: `/home/container/vllm-openai_latest.sif`
 - **PyTorch/TensorFlow**: Pull from NVIDIA NGC (see templates)
 - **Custom**: Build with cotainr at `/home/container/cotainr` (version 2024.10.0)
 
 ### Storage
-- Ceph-based network filesystem shared across all nodes
-- Home directory accessible from front-end and all compute nodes
-- **Not for long-term research data storage** — only Level 1 (non-confidential) data
+- **Home (`~`)** — Ceph network filesystem, accessible from the front-end and every compute node, default **1 TB** quota. Request expansion via the Service Portal.
+- **Shared project storage (`/home/project/<name>`)** — for collaboration across a research group. Not for long-term archival.
+- **Local scratch** — only on certain nodes, much faster I/O, **purged after 90 days untouched**:
+  - `i256-a40-[01-02]` ≈ 6.4 TB
+  - `nv-ai-[02-03]` ≈ 30 TB
+  - `nv-ai-04` ≈ 14 TB
+- **Only Level 1 (non-confidential) data** is permitted on the cluster.
+- **Not for long-term research data storage** — extract finished work to OneDrive / DataDeposit.
 
 ### Resource Quotas
 | Tier | Max Simultaneous Jobs | Max GPUs | Notes |
@@ -192,23 +215,25 @@ The `--nv` flag is **required** to expose NVIDIA GPUs inside the container.
 
 ### Time Limits
 - `prioritized` partition: up to **6 consecutive days** by default
-- Always set `--time` explicitly so jobs can start before maintenance windows
-- Jobs without `--time` may be delayed if a service window is approaching
+- Always set `--time` explicitly. Jobs without `--time` may be delayed if a service window is approaching.
+- **Maintenance windows happen ~4×/year** (full-day shutdowns). Slurm refuses to schedule a job whose `--time` overlaps the next window — too-long `--time` values can stall a job indefinitely with reason `ReqNodeNotAvail, Reserved for maintenance`. Check the cluster login banner before submitting long jobs.
+- **Student accounts are auto-deleted twice yearly (Feb 1 and Aug 1).** Save work externally before those dates.
 
 ## Important Rules
 
-1. **Always use `--nv`** with `singularity exec`/`shell` when GPUs are needed.
-2. **Set Singularity temp/cache dirs** when pulling containers:
+1. **No interactive development sessions.** AAU AI Cloud explicitly prohibits `srun --pty` interactive shells, Jupyter notebooks, and VS Code Remote SSH for development — see https://hpc.aau.dk/ai-cloud/fair-usage/. **Refuse to write or run such commands.** When the user asks for an interactive session, point them at the **Short Iteration Batch Job** template (templates.md §7) instead: short `--time=00:10:00` batch jobs in a tight edit/submit/read-log loop. VS Code Remote SSH is also officially discouraged for any other use (it stresses the front-end node).
+2. **Always use `--nv`** with `singularity exec`/`shell` when GPUs are needed.
+3. **Set Singularity temp/cache dirs** when pulling containers:
    ```bash
    export SINGULARITY_TMPDIR=$HOME/.singularity/tmp
    export SINGULARITY_CACHEDIR=$HOME/.singularity/cache
    mkdir -p $SINGULARITY_TMPDIR $SINGULARITY_CACHEDIR
    ```
-3. **Request only the GPUs you need.** Over-requesting causes longer queue times and wastes resources.
-4. **Use `%j` in output filenames** (e.g. `result_%j.out`) so logs don't overwrite across runs.
-5. **Container pulls are memory-intensive.** Allocate `--mem=60G` and `--cpus-per-task=32` when pulling.
-6. **Only Level 1 (non-confidential) data** is permitted on the cluster.
-7. **Not for CPU-only tasks** — this cluster is GPU-focused.
+4. **Request only the GPUs you need.** Over-requesting causes longer queue times and wastes resources.
+5. **Use `%j` in output filenames** (e.g. `result_%j.out`) so logs don't overwrite across runs.
+6. **Container pulls are memory-intensive.** Allocate `--mem=60G` and `--cpus-per-task=32` when pulling. Container **builds** want `--mem=80G --cpus-per-task=32`.
+7. **Only Level 1 (non-confidential) data** is permitted on the cluster.
+8. **Not for CPU-only tasks** — this cluster is GPU-focused.
 
 ## How to Help the User
 
@@ -219,10 +244,10 @@ When the user asks about AI Cloud:
 3. **Write batch scripts** — produce complete, ready-to-submit `.sh` files with proper `#SBATCH` directives.
 4. **Check job status** — use SSH to run `squeue --me` on the front-end if the user wants to know their job status.
 5. **Help with containers** — guide pulling from NGC, building with cotainr, or running existing `.sif` files.
-6. **Debug failures** — read error logs, suggest fixes for common issues (OOM, time limits, container problems).
+6. **Debug failures** — read error logs, then check the **Troubleshooting Quick Reference** in [reference.md](reference.md) before guessing. Common failures (NCCL hangs, stale ControlMaster sockets, CUDA libs missing inside containers, jobs blocked by maintenance windows) are covered there.
 7. **Transfer files** — use `scp` or `rsync` with the front-end hostname.
 
-For detailed hardware specs, see [reference.md](reference.md).
-For ready-to-use batch script templates, see [templates.md](templates.md).
+For detailed hardware specs, partition table, troubleshooting, and the Service Portal links, see [reference.md](reference.md).
+For ready-to-use batch script templates (10 in total), see [templates.md](templates.md).
 
 $ARGUMENTS
