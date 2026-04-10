@@ -13,27 +13,9 @@ It's AAU-specific. If you don't have an AAU AI Cloud account, this skill won't b
 
 ## What does this look like?
 
-```
-> /ai-cloud train a resnet50 on 2 L40s GPUs for 6 hours
+<video src="https://github.com/user-attachments/assets/b608cf9b-b188-4b98-94b7-c33dd19ab254" autoplay muted loop playsinline controls></video>
 
-I'll write you a batch script for that. Here's resnet50_train.sh:
-
-#!/bin/bash
-#SBATCH --job-name=resnet50_train
-#SBATCH --output=resnet50_%j.out
-#SBATCH --error=resnet50_%j.err
-#SBATCH --gres=gpu:l40s:2
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --time=06:00:00
-
-singularity exec --nv pytorch_24.09-py3.sif python3 train_resnet50.py
-
-Submit with:  ssh aicloud "cd ~/your-project && sbatch resnet50_train.sh"
-Check status: ssh aicloud "squeue --me"
-```
-
-The skill knows the cluster's GPU inventory, so it picks `--gres=gpu:l40s:2` rather than guessing a generic `--gres=gpu:2`. It also won't let you accidentally do things the cluster prohibits — ask it for an interactive Jupyter session and it'll refuse and point you at the short-batch-job alternative instead.
+A short demo against a real AAU AI Cloud account: Claude checks what's running, pulls recent job history, reads an existing `sbatch` script, rewrites it for a different GPU type, submits it, and verifies it queued — all from short natural-language prompts. The skill also knows the cluster's GPU inventory, so it picks `--gres=gpu:l40s:2` rather than guessing a generic `--gres=gpu:2`, and it refuses workflows that violate AAU fair-use policy (ask for an interactive Jupyter session and it'll point you at the short-batch-job alternative instead).
 
 ## Features
 
