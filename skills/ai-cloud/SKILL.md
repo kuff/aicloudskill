@@ -24,10 +24,13 @@ Always treat these names as synonymous.
 
 ### Connection & Authentication
 
-SSH to the cluster requires MFA (phone push notification). To avoid repeated MFA
-prompts, this skill uses **SSH ControlMaster** to multiplex all commands over a
-single authenticated connection. The user authenticates **once per session**; all
-subsequent SSH commands reuse that connection automatically.
+SSH to the cluster requires the user's **AAU password** plus a **mobile 2FA challenge** (push notification or authenticator code, depending on the user's setup). Both prompts are interactive — **Claude cannot perform the login itself.** Instead, this skill uses **SSH ControlMaster** to multiplex all commands over a single user-authenticated connection: the user runs `ssh aicloud` once in a separate terminal, completes the password + 2FA challenge, and then Claude reuses that authenticated connection for every subsequent command in the conversation.
+
+There are exactly two situations in which Claude must hand off to the user for re-authentication:
+1. **No active connection.** The first SSH command of a conversation, or any time the ControlMaster socket doesn't exist.
+2. **Stale / hanging connection.** A previously-working `ssh aicloud …` command suddenly hangs or fails with a connection error. This typically happens after a network blip, after `ControlPersist` expires, or after the user's machine wakes from sleep. The socket may still pass `ssh -O check` but real commands time out.
+
+In both cases the procedure is the same: detect, hand off, wait for the user's "ready" confirmation, verify, then resume.
 
 - **Front-end node**: `ai-fe02.srv.aau.dk`
 - **SSH alias**: `ssh aicloud` (configured via `~/.ssh/config`)
@@ -62,19 +65,28 @@ The socket directory `~/.ssh/sockets/` must exist.
 
 #### Before Any SSH Command — Connection Check Procedure
 
-**You MUST follow this procedure before the first SSH command in a conversation:**
+**You MUST follow this procedure before the first SSH command in a conversation, AND any time a remote command hangs or returns a connection error mid-conversation.**
 
-1. **Check for an active connection:**
+1. **Check for an active master socket:**
    ```bash
    ssh -O check aicloud 2>&1
    ```
-   - If this returns `Master running`, skip to step 5.
-   - If this returns `No ControlPath specified` or `No such name`, the SSH config
-     needs setup — go to step 2.
-   - Other errors likely indicate a network issue.
+   - `Master running` → go to step 2 (liveness probe).
+   - `No ControlPath specified` / `No such name` → SSH config needs setup, go to step 3.
+   - Any other error → treat as no connection, go to step 3.
 
-2. **Discover existing SSH config:** Read `~/.ssh/config` and look for any `Host`
-   entry with `HostName ai-fe02.srv.aau.dk`.
+2. **Liveness probe** (only when step 1 reported `Master running`):
+   ```bash
+   timeout 5 ssh aicloud true
+   ```
+   - Returns exit 0 within 5 seconds → connection is healthy. **Skip to step 7.**
+   - Times out (exit 124), returns non-zero, or hangs → the socket is **stale**. `ssh -O check` lies in this case; the master process is alive but the underlying TCP connection is dead. Close it and start fresh:
+     ```bash
+     ssh -O exit aicloud 2>/dev/null
+     ```
+     Then continue to step 3 to re-authenticate.
+
+3. **Discover or create the SSH config entry:** Read `~/.ssh/config` and look for any `Host` entry with `HostName ai-fe02.srv.aau.dk`.
 
    **a) Entry exists under a different name** (e.g. `Host AI-Cloud`):
    - Add `aicloud` as an additional alias: change `Host AI-Cloud` to `Host aicloud AI-Cloud`
@@ -87,24 +99,38 @@ The socket directory `~/.ssh/sockets/` must exist.
 
    **b) No entry exists:**
    - Ask the user for their AAU login (format: `username@domain.aau.dk`)
+   - Ask whether they're on-campus / on AAU VPN, or off-campus (so you know whether to include `ProxyJump`)
    - Create a new `Host aicloud` entry with all settings shown above
 
-3. **Ensure socket directory exists:**
+4. **Ensure the socket directory exists:**
    ```bash
    mkdir -p ~/.ssh/sockets
    ```
 
-4. **Ask the user to authenticate:** Tell the user:
-   > I need an SSH connection to AI Cloud. Please run this in a **separate terminal**:
+5. **Hand off to the user for interactive authentication.** **You cannot perform this step yourself** — the AAU password prompt and the mobile 2FA challenge are interactive and only the user can answer them. Send the user this message verbatim (or close to it):
+
+   > I need an authenticated SSH connection to AI Cloud before I can run any cluster commands. Please open a **separate terminal** on your machine and run:
+   >
    > ```
    > ssh aicloud
    > ```
-   > You'll receive a push notification on your phone — approve it to complete login.
-   > Leave that terminal open and let me know once you're connected.
+   >
+   > It will prompt you for your **AAU password**, then trigger a **mobile 2FA challenge** (push notification or code from your authenticator app — whichever you have set up). Approve it to complete the login.
+   >
+   > Once you see the cluster shell prompt, **reply here with "ready"** (or any short confirmation) and I'll resume from where we left off. You can leave that terminal open or close it — the ControlMaster socket persists either way for `ControlPersist` (8h by default).
 
-   After the user confirms, verify with `ssh -O check aicloud 2>&1`.
+6. **Stop and wait for the user's confirmation. Do not poll, do not retry, do not assume.** The user must explicitly tell you they have completed the login. After they confirm, verify with the liveness probe:
+   ```bash
+   timeout 5 ssh aicloud true
+   ```
+   - Exit 0 → continue to step 7.
+   - Still failing → ask the user what error they saw in the separate terminal, and troubleshoot from there. Do not loop on the probe.
 
-5. **Proceed.** Use `ssh aicloud <command>` for all remote commands.
+7. **Proceed.** Use `ssh aicloud <command>` for all remote commands.
+
+#### Recovering from a stale socket mid-conversation
+
+If a previously-working `ssh aicloud …` command hangs or returns a connection error, **do not retry blindly**. The ControlMaster socket has gone stale (network blip, `ControlPersist` expired, sleep/wake on the user's laptop, VPN dropout). Re-run the **Connection Check Procedure** from step 1 — the liveness probe in step 2 will catch the stale socket, the cleanup in step 2 will close it, and the handoff in step 5 will get you a fresh authenticated connection. Tell the user briefly what happened ("the SSH connection went stale, I need you to re-authenticate") so they understand why they're being asked to log in again.
 
 #### All Remote Commands Use the `aicloud` Alias
 
@@ -239,7 +265,7 @@ Building a `.sif` from a `.def` file requires `--fakeroot` for unprivileged user
 
 When the user asks about AI Cloud:
 
-1. **Ensure connection** — before the first SSH command, follow the **Connection Check Procedure** above. If the ControlMaster connection drops mid-session (command fails with connection error), re-run the procedure.
+1. **Ensure connection** — before the first SSH command, follow the **Connection Check Procedure** above. The procedure has a liveness probe that catches stale ControlMaster sockets (where `ssh -O check` says `Master running` but real commands hang). If a previously-working command hangs or fails mid-conversation, re-run the procedure from step 1; do not retry the failing command in a loop. Always hand off to the user for password + 2FA — never attempt to authenticate yourself.
 2. **Generate correct commands** — use the `aicloud` alias and the Slurm flags documented above. Never guess Slurm flags.
 3. **Write batch scripts** — produce complete, ready-to-submit `.sh` files with proper `#SBATCH` directives.
 4. **Check job status** — use SSH to run `squeue --me` on the front-end if the user wants to know their job status.

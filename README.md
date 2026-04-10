@@ -39,7 +39,7 @@ The skill knows the cluster's GPU inventory, so it picks `--gres=gpu:l40s:2` rat
 
 - Generates correct `srun` / `sbatch` commands with proper resource flags
 - Knows the full hardware inventory (27 nodes, 7 GPU types from T4 to A100)
-- Handles SSH MFA via ControlMaster so you authenticate once per session
+- **Authentication handoff** — Claude detects when an SSH session is missing or has gone stale (connections that look alive but actually hang) and asks you to run `ssh aicloud` in a separate terminal, where you complete the AAU password + mobile 2FA challenge yourself. Once you reply "ready", Claude resumes and reuses the same authenticated connection (via SSH ControlMaster) for the rest of the conversation. Claude never sees your password or 2FA token.
 - 10 ready-to-submit batch script templates (single-GPU, multi-GPU DDP, NGC pulls, container builds, vLLM inference, job arrays, off-peak scheduling, …)
 - Understands Singularity workflows: NGC pulls, cotainr builds, `.def` builds with `--fakeroot`, pre-built `/home/container/` images
 - Knows resource quotas, partitions, fair-usage policies, time limits, and the ~4×/year maintenance windows
